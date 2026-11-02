@@ -1,0 +1,111 @@
+--[[
+  Tint.fuse
+  Maps image luminance onto a Black -> White color pair.
+  Install: drop into  .../Fusion/Fuses/  and restart (Fuses > Color > Tint).
+]]
+
+FuRegisterClass("Tint", CT_Tool, {
+    REGS_Name          = "Tint",
+    REGS_Category      = "Fuses\\Color",
+    REGS_OpIconString  = "Tint",
+    REGS_OpDescription = "Maps luminance to a black/white color pair",
+    REG_NoMotionBlurCtrls = true,
+    REG_OpNoMask       = false,
+    REG_NoBlendCtrls   = false,
+})
+
+local Params = [[
+    float blk[3];
+    float wht[3];
+    float amount;
+    int   srcsize[2];
+    int   compOrder;
+]]
+
+local Kernel = [[
+__KERNEL__ void TintKernel(__CONSTANTREF__ TintParams *params, __TEXTURE2D__ src, __TEXTURE2D_WRITE__ dst)
+{
+    DEFINE_KERNEL_ITERATORS_XY(x, y);
+    if (x < params->srcsize[0] && y < params->srcsize[1])
+    {
+        float4 c = _tex2DVecN(src, x, y, params->compOrder);
+        float a = c.w;
+        float r = c.x, g = c.y, b = c.z;
+        if (a > 1e-6f) { r /= a; g /= a; b /= a; }
+
+        float L = 0.2126f * r + 0.7152f * g + 0.0722f * b;
+        float tr = params->blk[0] + (params->wht[0] - params->blk[0]) * L;
+        float tg = params->blk[1] + (params->wht[1] - params->blk[1]) * L;
+        float tb = params->blk[2] + (params->wht[2] - params->blk[2]) * L;
+
+        r = r + (tr - r) * params->amount;
+        g = g + (tg - g) * params->amount;
+        b = b + (tb - b) * params->amount;
+
+        c.x = r * a; c.y = g * a; c.z = b * a;
+        _tex2DVec4Write(dst, x, y, c);
+    }
+}
+]]
+
+local function colorInput(label, id, ctrlId, group, def)
+    return self:AddInput(label, id, {
+        ICS_Name = label,
+        LINKID_DataType = "Number",
+        INPID_InputControl = "ColorControl",
+        INP_Default = def,
+        INP_MaxScale = 1.0,
+        CLRC_ShowWheel = false,
+        IC_ControlGroup = group,
+        IC_ControlID = ctrlId,
+    })
+end
+
+function Create()
+    InBlackR = colorInput("Map Black To", "BlackRed",   0, 1, 0.0)
+    InBlackG = colorInput("Map Black To", "BlackGreen", 1, 1, 0.0)
+    InBlackB = colorInput("Map Black To", "BlackBlue",  2, 1, 0.0)
+
+    InWhiteR = colorInput("Map White To", "WhiteRed",   0, 2, 1.0)
+    InWhiteG = colorInput("Map White To", "WhiteGreen", 1, 2, 1.0)
+    InWhiteB = colorInput("Map White To", "WhiteBlue",  2, 2, 1.0)
+
+    InAmount = self:AddInput("Amount to Tint", "Amount", {
+        LINKID_DataType = "Number", INPID_InputControl = "SliderControl",
+        INP_Default = 1.0, INP_MinScale = 0.0, INP_MaxScale = 1.0,
+    })
+    InSwap = self:AddInput("Swap Colors", "Swap", {
+        LINKID_DataType = "Number", INPID_InputControl = "CheckboxControl",
+        INP_Integer = true, INP_Default = 0,
+    })
+
+    InImage  = self:AddInput("Input", "Input", { LINKID_DataType = "Image", LINK_Main = 1 })
+    OutImage = self:AddOutput("Output", "Output", { LINKID_DataType = "Image", LINK_Main = 1 })
+end
+
+function Process(req)
+    local src = InImage:GetValue(req)
+    local dst = Image({ IMG_Like = src, IMG_DeferAlloc = true })
+
+    local blk = { InBlackR:GetValue(req).Value, InBlackG:GetValue(req).Value, InBlackB:GetValue(req).Value }
+    local wht = { InWhiteR:GetValue(req).Value, InWhiteG:GetValue(req).Value, InWhiteB:GetValue(req).Value }
+    if InSwap:GetValue(req).Value == 1 then blk, wht = wht, blk end
+
+    local node = DVIPComputeNode(req, "TintKernel", Kernel, "TintParams", Params)
+    local p = node:GetParamBlock(Params)
+    for i = 0, 2 do
+        p.blk[i] = blk[i + 1]
+        p.wht[i] = wht[i + 1]
+    end
+    p.amount     = InAmount:GetValue(req).Value
+    p.srcsize[0] = src.DataWindow:Width()
+    p.srcsize[1] = src.DataWindow:Height()
+    p.compOrder  = src:IsMask() and 1 or 15
+    node:SetParamBlock(p)
+
+    node:AddInput("src", src)
+    node:AddOutput("dst", dst)
+    node:RunSession(req)
+
+    OutImage:Set(req, dst)
+end

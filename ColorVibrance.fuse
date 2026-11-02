@@ -1,0 +1,184 @@
+--[[
+  ColorVibrance.fuse
+  Colorizes footage along a black -> Color -> white ramp,
+  so shadows stay dark and highlights burn to white.
+  Install: drop into  .../Fusion/Fuses/  and restart (Fuses > Color > Color Vibrance).
+]]
+
+FuRegisterClass("ColorVibrance", CT_Tool, {
+    REGS_Name          = "Color Vibrance",
+    REGS_Category      = "Fuses\\Color",
+    REGS_OpIconString  = "CVib",
+    REGS_OpDescription = "Colorizes footage along a black / color / white ramp",
+    REG_NoMotionBlurCtrls = true,
+    REG_OpNoMask       = false,
+    REG_NoBlendCtrls   = false,
+})
+
+local Params = [[
+    float col[3];
+    float vib;
+    float pres;
+    float bright;
+    float gam;
+    float boost;
+    int   invert;
+    int   fill;
+    int   matte;
+    int   srcsize[2];
+    int   compOrder;
+]]
+
+local Kernel = [[
+__DEVICE__ float luma(float r, float g, float b) { return 0.2126f * r + 0.7152f * g + 0.0722f * b; }
+
+__DEVICE__ float3 vibranceMap(float L, __CONSTANTREF__ VibParams *p)
+{
+    L = _saturatef(L);
+    if (p->invert) L = 1.0f - L;
+    L = _powf(L, 1.0f / _fmaxf(p->gam, 0.001f));
+
+    float r, g, b;
+    if (L < 0.5f) {
+        float t = L * 2.0f;
+        r = p->col[0] * t; g = p->col[1] * t; b = p->col[2] * t;
+    } else {
+        float t = L * 2.0f - 1.0f;
+        r = p->col[0] + (1.0f - p->col[0]) * t;
+        g = p->col[1] + (1.0f - p->col[1]) * t;
+        b = p->col[2] + (1.0f - p->col[2]) * t;
+    }
+
+    float m = luma(r, g, b);
+    r = m + (r - m) * p->vib;
+    g = m + (g - m) * p->vib;
+    b = m + (b - m) * p->vib;
+
+    float m2 = luma(r, g, b);
+    float s = (m2 > 1e-5f) ? (L / m2) : 0.0f;
+    r = r + (r * s - r) * p->pres;
+    g = g + (g * s - g) * p->pres;
+    b = b + (b * s - b) * p->pres;
+
+    return make_float3(_fmaxf(r * p->bright, 0.0f),
+                       _fmaxf(g * p->bright, 0.0f),
+                       _fmaxf(b * p->bright, 0.0f));
+}
+
+__KERNEL__ void VibKernel(__CONSTANTREF__ VibParams *params, __TEXTURE2D__ src, __TEXTURE2D_WRITE__ dst)
+{
+    DEFINE_KERNEL_ITERATORS_XY(x, y);
+    if (x < params->srcsize[0] && y < params->srcsize[1])
+    {
+        float4 c = _tex2DVecN(src, x, y, params->compOrder);
+        float a = c.w;
+        float r = c.x, g = c.y, b = c.z;
+        if (a > 1e-6f) { r /= a; g /= a; b /= a; }
+
+        float3 o = vibranceMap(luma(r, g, b), params);
+
+        // Fill Empty BG: composite over the colorized value of black
+        if (params->fill) {
+            float3 bg = vibranceMap(0.0f, params);
+            o.x = bg.x + (o.x - bg.x) * a;
+            o.y = bg.y + (o.y - bg.y) * a;
+            o.z = bg.z + (o.z - bg.z) * a;
+            a = 1.0f;
+        }
+
+        // Matte Alpha: 1 = Luminance, 2 = Inverted Luminance
+        if (params->matte > 0) {
+            float m = _saturatef(luma(o.x, o.y, o.z));
+            if (params->matte == 2) m = 1.0f - m;
+            m = _saturatef(m * (1.0f + params->boost));
+            a *= m;
+        }
+
+        c.x = o.x * a; c.y = o.y * a; c.z = o.z * a; c.w = a;
+        _tex2DVec4Write(dst, x, y, c);
+    }
+}
+]]
+
+local function slider(name, id, def, mn, mx)
+    return self:AddInput(name, id, {
+        LINKID_DataType = "Number", INPID_InputControl = "SliderControl",
+        INP_Default = def, INP_MinScale = mn, INP_MaxScale = mx,
+    })
+end
+
+local function checkbox(name, id)
+    return self:AddInput(name, id, {
+        LINKID_DataType = "Number", INPID_InputControl = "CheckboxControl",
+        INP_Integer = true, INP_Default = 0,
+    })
+end
+
+function Create()
+    InColR = self:AddInput("Red", "ColorRed", {
+        ICS_Name = "Color", LINKID_DataType = "Number", INPID_InputControl = "ColorControl",
+        INP_Default = 0.55, INP_MaxScale = 1.0, CLRC_ShowWheel = false,
+        IC_ControlGroup = 1, IC_ControlID = 0,
+    })
+    InColG = self:AddInput("Green", "ColorGreen", {
+        LINKID_DataType = "Number", INPID_InputControl = "ColorControl",
+        INP_Default = 1.0, IC_ControlGroup = 1, IC_ControlID = 1,
+    })
+    InColB = self:AddInput("Blue", "ColorBlue", {
+        LINKID_DataType = "Number", INPID_InputControl = "ColorControl",
+        INP_Default = 0.0, IC_ControlGroup = 1, IC_ControlID = 2,
+    })
+
+    InVib    = slider("Vibrance",           "Vibrance",          1.0, 0.0, 4.0)
+    InPres   = slider("Preserve Luminance", "PreserveLuminance", 1.0, 0.0, 1.0)
+    InBright = slider("Brightness",         "Brightness",        1.0, 0.0, 4.0)
+    InGamma  = slider("Gamma",              "Gamma",             1.0, 0.1, 4.0)
+    InFill   = checkbox("Fill Empty BG",    "FillEmptyBG")
+    InInvert = checkbox("Invert",           "Invert")
+    InMatte  = self:AddInput("Matte Alpha", "MatteAlpha", {
+        LINKID_DataType = "Number", INPID_InputControl = "ComboControl",
+        INP_Integer = true, INP_Default = 0,
+        { CCS_AddString = "Off" },
+        { CCS_AddString = "Luminance" },
+        { CCS_AddString = "Inverted Luminance" },
+    })
+    InBoost  = slider("Alpha Boost", "AlphaBoost", 0.0, 0.0, 4.0)
+
+    InImage  = self:AddInput("Input", "Input", { LINKID_DataType = "Image", LINK_Main = 1 })
+    OutImage = self:AddOutput("Output", "Output", { LINKID_DataType = "Image", LINK_Main = 1 })
+end
+
+function NotifyChanged(inp, param, time)
+    if inp == InMatte and param then
+        InBoost:SetAttrs({ IC_Visible = true, INPB_Disabled = (param.Value == 0) })
+    end
+end
+
+function Process(req)
+    local src = InImage:GetValue(req)
+    local dst = Image({ IMG_Like = src, IMG_DeferAlloc = true })
+
+    local node = DVIPComputeNode(req, "VibKernel", Kernel, "VibParams", Params)
+    local p = node:GetParamBlock(Params)
+    p.col[0]  = InColR:GetValue(req).Value
+    p.col[1]  = InColG:GetValue(req).Value
+    p.col[2]  = InColB:GetValue(req).Value
+    p.vib     = InVib:GetValue(req).Value
+    p.pres    = InPres:GetValue(req).Value
+    p.bright  = InBright:GetValue(req).Value
+    p.gam     = InGamma:GetValue(req).Value
+    p.boost   = InBoost:GetValue(req).Value
+    p.invert  = InInvert:GetValue(req).Value
+    p.fill    = InFill:GetValue(req).Value
+    p.matte   = InMatte:GetValue(req).Value
+    p.srcsize[0] = src.DataWindow:Width()
+    p.srcsize[1] = src.DataWindow:Height()
+    p.compOrder  = src:IsMask() and 1 or 15
+    node:SetParamBlock(p)
+
+    node:AddInput("src", src)
+    node:AddOutput("dst", dst)
+    node:RunSession(req)
+
+    OutImage:Set(req, dst)
+end
