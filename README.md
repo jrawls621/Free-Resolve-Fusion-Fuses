@@ -13,7 +13,7 @@ Stack them (Tint → Color Vibrance) for a classic colorize look.
 
 These tools are **inspired by** the Tint effect in Adobe After Effects and the Color Vibrance plugin by Video Copilot. They are independent, from-scratch implementations written for Fusion. They contain no code from those products and are not affiliated with, endorsed by, or sponsored by Adobe or Video Copilot. Product names belong to their respective owners.
 
-Color Vibrance was calibrated against measured output of the original, so it matches closely (typically within 0.001 on the ramp, Brightness, Gamma, Invert, Preserve Luminance and Matte Alpha). Vibrance above 1 is an approximation. Tint is an approximation of the look.
+Color Vibrance was calibrated against measured output of the original, so it matches closely (typically within 0.001 on the ramp, Brightness, Gamma, Invert, Preserve Luminance and Matte Alpha). Vibrance above 1 is an approximation. Tint uses Rec.601 luma and matches the original on measured pixels.
 
 ## Install
 
