@@ -78,7 +78,7 @@ __DEVICE__ float3 vibranceMap(float L, __CONSTANTREF__ VibParams *p)
         float s = L / m;
         float pr = r * s, pg = g * s, pb = b * s;
         float mx = _fmaxf(pr, _fmaxf(pg, pb));
-        if (mx > 1.0f && L < 1.0f) {
+        if (mx > 1.0f && _fabs(mx - L) > 1e-6f) {
             float f = (1.0f - L) / (mx - L);
             pr = L + (pr - L) * f; pg = L + (pg - L) * f; pb = L + (pb - L) * f;
         }
@@ -97,8 +97,7 @@ __KERNEL__ void VibKernel(__CONSTANTREF__ VibParams *params, __TEXTURE2D__ src, 
         float4 c = _tex2DVecN(src, x, y, params->compOrder);
         float a = c.w;
         float r = c.x, g = c.y, b = c.z;
-        if (a > 1e-6f) { r /= a; g /= a; b /= a; }
-
+        // luma is taken from the premultiplied pixel, so soft edges map darker
         float3 o = vibranceMap(luma601(r, g, b), params);
 
         // Fill Empty BG: composite over the colorized value of black, output opaque
