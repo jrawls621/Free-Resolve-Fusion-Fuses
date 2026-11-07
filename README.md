@@ -13,7 +13,7 @@ Stack them (Tint → Color Vibrance) for a classic colorize look.
 
 These tools are **inspired by** the Tint effect in Adobe After Effects and the Color Vibrance plugin by Video Copilot. They are independent, from-scratch implementations written for Fusion. They contain no code from those products and are not affiliated with, endorsed by, or sponsored by Adobe or Video Copilot. Product names belong to their respective owners.
 
-The math is an approximation of the look, not a copy of either product's algorithm, so results may differ slightly.
+Color Vibrance was calibrated against measured output of the original, so it matches closely (typically within 0.001 on the ramp, Brightness, Gamma, Invert, Preserve Luminance and Matte Alpha). Vibrance above 1 is an approximation. Tint is an approximation of the look.
 
 ## Install
 
@@ -37,14 +37,14 @@ Tested on DaVinci Resolve Studio 21.1.2.
 
 ### Color Vibrance
 - **Color**: the midtone color of the ramp.
-- **Vibrance**: saturation of the colorized result.
+- **Vibrance** (0–2): below 1 fades toward gray, above 1 pushes the color harder.
 - **Preserve Luminance**: how closely the result keeps the source's brightness.
 - **Brightness**: overall output multiplier.
 - **Gamma**: shifts where the color sits between shadows and highlights.
 - **Fill Empty BG**: composites the result over the colorized black, filling transparent areas and making the output opaque.
 - **Invert**: flips the luminance before colorizing.
-- **Matte Alpha**: *Off*, *Luminance*, or *Inverted Luminance*. Builds alpha from the result's brightness, so smoke or fire can sit directly over a plate without a separate key.
-- **Alpha Boost**: strengthens the matte (active when Matte Alpha is on).
+- **Matte Alpha**: *Off*, *On* (alpha from the brightest channel, color un-premultiplied), or *Only* (white with alpha from luma). Lets smoke or fire sit directly over a plate without a separate key.
+- **Alpha Boost**: strengthens the matte (active when Matte Alpha is On or Only).
 
 ## Tips
 

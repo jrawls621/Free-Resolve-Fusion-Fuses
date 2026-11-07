@@ -30,39 +30,63 @@ local Params = [[
 ]]
 
 local Kernel = [[
-__DEVICE__ float luma(float r, float g, float b) { return 0.2126f * r + 0.7152f * g + 0.0722f * b; }
+__DEVICE__ float luma601(float r, float g, float b) { return 0.299f * r + 0.587f * g + 0.114f * b; }
+
+__DEVICE__ float mobius(float x, float g) { return g * x / (1.0f + (g - 1.0f) * x); }
+
+// per-channel piecewise-linear ramp: black -> c -> white (extends past 1.0)
+__DEVICE__ float ramp(float L, float c)
+{
+    c = _fminf(_fmaxf(c, 0.0f), 1.0f);
+    if (c < 1e-4f) return (L <= 1.0f) ? 0.0f : (L - 1.0f);
+    if (L <= 1.0f - c) return c * L;
+    float k = 1.0f / (1.0f + c);
+    if (L <= k) return (1.0f + c) * L + c - 1.0f;
+    float slope = (1.0f - c * c) / c;
+    if (L > 1.0f) return 1.0f + _fminf(slope, 1.0f + c) * (L - 1.0f);
+    return c + slope * (L - k);
+}
 
 __DEVICE__ float3 vibranceMap(float L, __CONSTANTREF__ VibParams *p)
 {
-    L = _saturatef(L);
-    if (p->invert) L = 1.0f - L;
-    L = _powf(L, 1.0f / _fmaxf(p->gam, 0.001f));
+    L = _fmaxf(L, 0.0f);
+    if (p->invert) L = 1.0f - _fminf(L, 1.0f);
+    float ge = _powf(_fmaxf(p->gam, 0.001f), 0.992f);
+    L = mobius(L, ge);
+    L = L * p->bright;
 
-    float r, g, b;
-    if (L < 0.5f) {
-        float t = L * 2.0f;
-        r = p->col[0] * t; g = p->col[1] * t; b = p->col[2] * t;
+    float r = ramp(L, p->col[0]);
+    float g = ramp(L, p->col[1]);
+    float b = ramp(L, p->col[2]);
+
+    // Vibrance: 0..1 fades to gray, 1..2 pushes channels away from the strongest one
+    float v = _fminf(_fmaxf(p->vib, 0.0f), 2.0f);
+    if (v <= 1.0f) {
+        r = L + (r - L) * v; g = L + (g - L) * v; b = L + (b - L) * v;
     } else {
-        float t = L * 2.0f - 1.0f;
-        r = p->col[0] + (1.0f - p->col[0]) * t;
-        g = p->col[1] + (1.0f - p->col[1]) * t;
-        b = p->col[2] + (1.0f - p->col[2]) * t;
+        float t = v - 1.0f;
+        float mx = _fmaxf(r, _fmaxf(g, b));
+        float xr = _fmaxf(0.0f, r - 0.38f * (mx - r));
+        float xg = _fmaxf(0.0f, g - 0.38f * (mx - g));
+        float xb = _fmaxf(0.0f, b - 0.38f * (mx - b));
+        r = r + (xr - r) * t; g = g + (xg - g) * t; b = b + (xb - b) * t;
     }
 
-    float m = luma(r, g, b);
-    r = m + (r - m) * p->vib;
-    g = m + (g - m) * p->vib;
-    b = m + (b - m) * p->vib;
-
-    float m2 = luma(r, g, b);
-    float s = (m2 > 1e-5f) ? (L / m2) : 0.0f;
-    r = r + (r * s - r) * p->pres;
-    g = g + (g * s - g) * p->pres;
-    b = b + (b * s - b) * p->pres;
-
-    return make_float3(_fmaxf(r * p->bright, 0.0f),
-                       _fmaxf(g * p->bright, 0.0f),
-                       _fmaxf(b * p->bright, 0.0f));
+    // Preserve Luminance: rescale to the source luma, fitting into gamut
+    float m = luma601(r, g, b);
+    if (m > 1e-6f && p->pres > 0.0f) {
+        float s = L / m;
+        float pr = r * s, pg = g * s, pb = b * s;
+        float mx = _fmaxf(pr, _fmaxf(pg, pb));
+        if (mx > 1.0f && L < 1.0f) {
+            float f = (1.0f - L) / (mx - L);
+            pr = L + (pr - L) * f; pg = L + (pg - L) * f; pb = L + (pb - L) * f;
+        }
+        r = r + (pr - r) * p->pres;
+        g = g + (pg - g) * p->pres;
+        b = b + (pb - b) * p->pres;
+    }
+    return make_float3(_fmaxf(r, 0.0f), _fmaxf(g, 0.0f), _fmaxf(b, 0.0f));
 }
 
 __KERNEL__ void VibKernel(__CONSTANTREF__ VibParams *params, __TEXTURE2D__ src, __TEXTURE2D_WRITE__ dst)
@@ -75,9 +99,9 @@ __KERNEL__ void VibKernel(__CONSTANTREF__ VibParams *params, __TEXTURE2D__ src, 
         float r = c.x, g = c.y, b = c.z;
         if (a > 1e-6f) { r /= a; g /= a; b /= a; }
 
-        float3 o = vibranceMap(luma(r, g, b), params);
+        float3 o = vibranceMap(luma601(r, g, b), params);
 
-        // Fill Empty BG: composite over the colorized value of black
+        // Fill Empty BG: composite over the colorized value of black, output opaque
         if (params->fill) {
             float3 bg = vibranceMap(0.0f, params);
             o.x = bg.x + (o.x - bg.x) * a;
@@ -86,11 +110,19 @@ __KERNEL__ void VibKernel(__CONSTANTREF__ VibParams *params, __TEXTURE2D__ src, 
             a = 1.0f;
         }
 
-        // Matte Alpha: 1 = Luminance, 2 = Inverted Luminance
+        // Matte Alpha: 1 = On (alpha = brightest channel), 2 = Only (white, alpha = luma)
         if (params->matte > 0) {
-            float m = _saturatef(luma(o.x, o.y, o.z));
-            if (params->matte == 2) m = 1.0f - m;
-            m = _saturatef(m * (1.0f + params->boost));
+            float m;
+            if (params->matte == 1) {
+                m = _fmaxf(o.x, _fmaxf(o.y, o.z));
+                if (m > 1e-6f) { o.x /= m; o.y /= m; o.z /= m; }
+                else { o.x = 0.0f; o.y = 0.0f; o.z = 0.0f; }
+            } else {
+                m = luma601(o.x, o.y, o.z);
+                o.x = 1.0f; o.y = 1.0f; o.z = 1.0f;
+            }
+            m = _saturatef(m);
+            m = mobius(m, 1.0f + params->boost);
             a *= m;
         }
 
@@ -117,7 +149,7 @@ end
 function Create()
     InColR = self:AddInput("Red", "ColorRed", {
         ICS_Name = "Color", LINKID_DataType = "Number", INPID_InputControl = "ColorControl",
-        INP_Default = 0.55, INP_MaxScale = 1.0, CLRC_ShowWheel = false,
+        INP_Default = 0.5882, INP_MaxScale = 1.0, CLRC_ShowWheel = false,
         IC_ControlGroup = 1, IC_ControlID = 0,
     })
     InColG = self:AddInput("Green", "ColorGreen", {
@@ -129,7 +161,7 @@ function Create()
         INP_Default = 0.0, IC_ControlGroup = 1, IC_ControlID = 2,
     })
 
-    InVib    = slider("Vibrance",           "Vibrance",          1.0, 0.0, 4.0)
+    InVib    = slider("Vibrance",           "Vibrance",          1.0, 0.0, 2.0)
     InPres   = slider("Preserve Luminance", "PreserveLuminance", 1.0, 0.0, 1.0)
     InBright = slider("Brightness",         "Brightness",        1.0, 0.0, 4.0)
     InGamma  = slider("Gamma",              "Gamma",             1.0, 0.1, 4.0)
@@ -139,10 +171,10 @@ function Create()
         LINKID_DataType = "Number", INPID_InputControl = "ComboControl",
         INP_Integer = true, INP_Default = 0,
         { CCS_AddString = "Off" },
-        { CCS_AddString = "Luminance" },
-        { CCS_AddString = "Inverted Luminance" },
+        { CCS_AddString = "On" },
+        { CCS_AddString = "Only" },
     })
-    InBoost  = slider("Alpha Boost", "AlphaBoost", 0.0, 0.0, 4.0)
+    InBoost  = slider("Alpha Boost", "AlphaBoost", 1.0, 0.0, 4.0)
 
     InImage  = self:AddInput("Input", "Input", { LINKID_DataType = "Image", LINK_Main = 1 })
     OutImage = self:AddOutput("Output", "Output", { LINKID_DataType = "Image", LINK_Main = 1 })
